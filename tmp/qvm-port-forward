@@ -1,0 +1,60 @@
+#!/bin/sh
+
+# SPDX-FileCopyrightText: 2024 Solène Rapenne <solene@perso.pw>
+# SPDX-FileCopyrightText: 2025 Robin Schneider <ypid@riseup.net>
+#
+# SPDX-License-Identifier: MIT
+# https://github.com/QubesOS/qubes-core-admin-client/blob/main/LICENSE
+
+END_QUBE="$1"
+PORT="$2"
+TYPE="${3:-tcp}"
+
+usage() {
+    echo "usage: $0 qube_name port_number [tcp|udp]"
+    exit 0
+}
+
+find_netvm() {
+    QUBE="$1"
+    NET_VM="$(qvm-prefs "$QUBE" netvm)"
+
+    if [ "$NET_VM" != "" ]
+    then
+        echo "Qube $QUBE has $NET_VM for netvm"
+	DESTINATION="$(qvm-prefs "$QUBE" visible_ip)"
+        cat <<EOF | qvm-run --user=root --pass-io --no-shell "$NET_VM" "/bin/sh"
+# set -o xtrace
+if ! nft list chain ip6 qubes custom-forward | grep --quiet "${TYPE} dport ${PORT}"; then
+ 	nft add rule ip6 qubes custom-forward "${TYPE}" dport "${PORT}" counter accept
+ 	nft add rule ip qubes custom-forward "${TYPE}" dport "${PORT}" counter accept
+fi
+nft add chain ip qubes custom-dnat-port-forward "{ type nat hook prerouting priority dstnat; policy accept; }"
+if ! nft list chain ip qubes custom-dnat-port-forward | grep --quiet "${TYPE} dport ${PORT}"; then
+ 	nft add rule qubes custom-dnat-port-forward iifname != \"vif*\" "${TYPE}" dport "${PORT}" counter dnat "${DESTINATION}"
+fi
+EOF
+	if [ $? -eq 0 ] ; then echo "$NET_VM -> $QUBE: [OK]" ; else echo "$NET_VM -> $QUBE: [KO]" ; exit 1 ; fi
+        find_netvm "$NET_VM"
+    fi
+}
+
+if [ -z "$1" ] || [ -z "$2" ]
+then
+    usage
+fi
+
+if qvm-ls --running "${END_QUBE}" 1>/dev/null
+then
+    echo "qube is running"
+    find_netvm "$END_QUBE"
+    cat <<EOF | qvm-run --user=root --pass-io --no-shell "$END_QUBE" "/bin/sh"
+# set -o xtrace
+if ! nft list chain ip6 qubes custom-input | grep --quiet "${TYPE} dport ${PORT}"; then
+ 	nft add rule ip6 qubes custom-input "${TYPE}" dport "${PORT}" counter accept
+ 	nft add rule ip qubes custom-input "${TYPE}" dport "${PORT}" counter accept
+fi
+EOF
+else
+    echo "qube ${END_QUBE} is not running"
+fi
